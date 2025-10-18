@@ -1,4 +1,11 @@
+# =============================================================
+# 💊 HealthAI - Smart Healthcare Assistant
+# Final Streamlit Version (Stable & Cloud Compatible)
+# =============================================================
+
 import os
+os.environ["STREAMLIT_WATCHER_TYPE"] = "none"  # prevent inotify overflow
+
 import joblib
 import gdown
 import numpy as np
@@ -13,7 +20,8 @@ from mlxtend.frequent_patterns import apriori, association_rules
 from googletrans import Translator
 import tensorflow as tf
 import google.generativeai as genai
-import xgboost as xgb  # ✅ Added for XGBoost support
+import xgboost as xgb  # ✅ for XGBoost models
+
 
 # ----------------------------------------------------------
 # Streamlit Page Config
@@ -21,6 +29,7 @@ import xgboost as xgb  # ✅ Added for XGBoost support
 st.set_page_config(page_title="💊 HealthAI - Smart Healthcare Assistant", page_icon="💊", layout="wide")
 st.markdown("<h1 style='text-align:center;'>💊 HealthAI - Smart Healthcare Assistant</h1>", unsafe_allow_html=True)
 st.caption("AI-powered Health Analysis, Imaging (CNN), Time-series (LSTM), Chatbot (Gemini), Translator & Sentiment")
+
 
 # ----------------------------------------------------------
 # Google Drive Download Helper
@@ -77,7 +86,13 @@ def load_models():
 models, load_messages = load_models()
 for msg in load_messages:
     st.info(msg)
-st.markdown("<script>setTimeout(()=>{document.querySelectorAll('.stAlert').forEach(e=>e.remove());},3500)</script>", unsafe_allow_html=True)
+
+# auto-remove alerts after few seconds
+st.markdown(
+    "<script>setTimeout(()=>{document.querySelectorAll('.stAlert').forEach(e=>e.remove());},3500)</script>",
+    unsafe_allow_html=True,
+)
+
 
 # ----------------------------------------------------------
 # Grad-CAM for CNN Visualization
@@ -117,6 +132,7 @@ def overlay_heatmap(original, heatmap, alpha=0.4):
     heatmap_color = Image.fromarray((heatmap_color * 255).astype("uint8"))
     return Image.blend(original.convert("RGBA"), heatmap_color.convert("RGBA"), alpha)
 
+
 # ----------------------------------------------------------
 # Sidebar
 # ----------------------------------------------------------
@@ -134,10 +150,10 @@ page = st.sidebar.radio("Select a module", [
     "❤️ Sentiment Analysis"
 ])
 
+
 # ----------------------------------------------------------
 # Modules
 # ----------------------------------------------------------
-
 if page == "🏠 Home":
     st.header("Welcome to HealthAI 👋")
     st.markdown("""
@@ -150,6 +166,7 @@ if page == "🏠 Home":
     - 💬 Gemini Chatbot & 🌐 Translator
     - ❤️ Sentiment Analysis
     """)
+
 
 elif page == "🧬 Disease Risk Prediction":
     st.header("🧬 Disease Risk Prediction (XGBoost)")
@@ -167,6 +184,7 @@ elif page == "🧬 Disease Risk Prediction":
         else:
             st.error("Risk model not loaded or XGBoost missing.")
 
+
 elif page == "🏥 Length of Stay Prediction":
     st.header("🏥 Predict Length of Stay (LOS)")
     age = st.number_input("Age", 0, 120, 50)
@@ -180,6 +198,7 @@ elif page == "🏥 Length of Stay Prediction":
             st.success(f"🕓 Estimated Stay: {float(pred[0]):.2f} days")
         else:
             st.error("LOS model not loaded or XGBoost missing.")
+
 
 elif page == "🧠 CNN Imaging Diagnostics":
     st.header("🧠 CNN Imaging Diagnostics (Grad-CAM)")
@@ -198,11 +217,10 @@ elif page == "🧠 CNN Imaging Diagnostics":
     elif not model:
         st.error("CNN model not loaded.")
 
+
 elif page == "📊 LSTM Vitals Forecast":
     st.header("📊 LSTM Vitals Forecast (Predicted vs Actual Plot)")
-    df = pd.read_csv("data/vitals.csv") if os.path.exists("data/vitals.csv") else pd.DataFrame({
-        "Time": np.arange(20), "HeartRate": np.random.randint(60, 100, 20)
-    })
+    df = pd.DataFrame({"Time": np.arange(20), "HeartRate": np.random.randint(60, 100, 20)})
     st.line_chart(df.set_index("Time"))
     model = models.get("lstm")
     if model is not None:
@@ -215,6 +233,7 @@ elif page == "📊 LSTM Vitals Forecast":
         st.pyplot(fig)
         st.success(f"Predicted Next Heart Rate: {pred[0][0]:.2f}")
 
+
 elif page == "💬 Gemini Chatbot":
     st.header("💬 Gemini Chatbot")
     query = st.text_input("Ask your medical question:")
@@ -222,10 +241,12 @@ elif page == "💬 Gemini Chatbot":
         api_key = st.secrets.get("GENAI_API_KEY")
         if api_key:
             genai.configure(api_key=api_key)
-            response = genai.generate_content(f"You are a healthcare assistant. {query}")
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            response = model.generate_content(f"You are a healthcare assistant. {query}")
             st.write(response.text)
         else:
             st.error("Gemini API key not found in secrets.")
+
 
 elif page == "🌐 Translator":
     st.header("🌐 Translator")
@@ -236,6 +257,7 @@ elif page == "🌐 Translator":
         dest = {"English": "en", "Tamil": "ta", "Hindi": "hi", "Malayalam": "ml"}[lang]
         result = trans.translate(text, dest=dest)
         st.success(result.text)
+
 
 elif page == "❤️ Sentiment Analysis":
     st.header("❤️ Sentiment Analysis (Patient Feedback)")
