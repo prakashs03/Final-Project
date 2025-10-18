@@ -1,12 +1,12 @@
-streamlit>=1.20
+streamlit
 pandas
 numpy
 scikit-learn
+tensorflow
 matplotlib
+mlxtend
+Pillow
 joblib
 gdown
 googletrans==4.0.0-rc1
-mlxtend
-Pillow
-tensorflow>=2.11
 google-generativeai
