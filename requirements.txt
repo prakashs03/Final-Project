@@ -8,5 +8,6 @@ mlxtend
 Pillow
 joblib
 gdown
+xgboost
 googletrans==4.0.0-rc1
 google-generativeai
