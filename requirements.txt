@@ -7,8 +7,6 @@ matplotlib
 mlxtend
 Pillow
 joblib
-cgi
 gdown
 googletrans==4.0.0-rc1
 google-generativeai
-
