@@ -1,10 +1,11 @@
 streamlit
 pandas
 numpy
-scikit-learn
-joblib
-requests
-google-generativeai
-xgboost
+tensorflow
 torch
-textblob
+scikit-learn
+mlxtend
+matplotlib
+joblib
+gdown
+google-generativeai
