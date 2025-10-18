@@ -13,6 +13,7 @@ from mlxtend.frequent_patterns import apriori, association_rules
 from googletrans import Translator
 import tensorflow as tf
 import google.generativeai as genai
+import xgboost as xgb  # ✅ Added for XGBoost support
 
 # ----------------------------------------------------------
 # Streamlit Page Config
@@ -22,7 +23,7 @@ st.markdown("<h1 style='text-align:center;'>💊 HealthAI - Smart Healthcare Ass
 st.caption("AI-powered Health Analysis, Imaging (CNN), Time-series (LSTM), Chatbot (Gemini), Translator & Sentiment")
 
 # ----------------------------------------------------------
-# Download from Drive IDs stored in Secrets
+# Google Drive Download Helper
 # ----------------------------------------------------------
 @st.cache_resource
 def download_from_drive(file_id, output_path):
@@ -36,6 +37,9 @@ def download_from_drive(file_id, output_path):
     return output_path if os.path.exists(output_path) else None
 
 
+# ----------------------------------------------------------
+# Model Loader
+# ----------------------------------------------------------
 @st.cache_resource
 def load_models():
     models = {}
@@ -58,7 +62,7 @@ def load_models():
                     if local_path.endswith(".joblib"):
                         models[key] = joblib.load(local_path)
                     else:
-                        models[key] = tf.keras.models.load_model(local_path)
+                        models[key] = tf.keras.models.load_model(local_path, compile=False)
                     messages.append(f"✅ Loaded {key} successfully.")
                 else:
                     messages.append(f"⚠️ Could not load {key} (download failed).")
@@ -71,13 +75,12 @@ def load_models():
 
 
 models, load_messages = load_models()
-
 for msg in load_messages:
     st.info(msg)
 st.markdown("<script>setTimeout(()=>{document.querySelectorAll('.stAlert').forEach(e=>e.remove());},3500)</script>", unsafe_allow_html=True)
 
 # ----------------------------------------------------------
-# Grad-CAM for CNN
+# Grad-CAM for CNN Visualization
 # ----------------------------------------------------------
 def grad_cam(image_array, model):
     try:
@@ -132,26 +135,24 @@ page = st.sidebar.radio("Select a module", [
 ])
 
 # ----------------------------------------------------------
-# Pages
+# Modules
 # ----------------------------------------------------------
 
-# Home
 if page == "🏠 Home":
     st.header("Welcome to HealthAI 👋")
     st.markdown("""
     **HealthAI** integrates multiple AI-powered modules:
-    - 🧬 Disease Risk Prediction  
-    - 🏥 Length of Stay (Regression)  
-    - 🧠 CNN Imaging Diagnostics (Grad-CAM Visualization)  
-    - 📊 LSTM Time-Series Forecasting (with Predicted vs Actual Plot)  
-    - 👥 Clustering & 🔗 Association Rule Mining  
-    - 💬 Gemini Chatbot & 🌐 Translator  
+    - 🧬 Disease Risk Prediction (XGBoost)
+    - 🏥 Length of Stay (Regression)
+    - 🧠 CNN Imaging Diagnostics (Grad-CAM Visualization)
+    - 📊 LSTM Time-Series Forecasting
+    - 👥 Clustering & 🔗 Association Rule Mining
+    - 💬 Gemini Chatbot & 🌐 Translator
     - ❤️ Sentiment Analysis
     """)
 
-# Disease Risk
 elif page == "🧬 Disease Risk Prediction":
-    st.header("🧬 Disease Risk Prediction")
+    st.header("🧬 Disease Risk Prediction (XGBoost)")
     age = st.slider("Age", 18, 100, 45)
     bp = st.slider("Blood Pressure", 80, 200, 120)
     glucose = st.slider("Glucose Level", 50, 250, 100)
@@ -161,12 +162,11 @@ elif page == "🧬 Disease Risk Prediction":
         if model:
             X = np.array([[age, bp, glucose, bmi]])
             pred = model.predict(X)
-            result = "🚨 High Risk" if pred[0] == 1 else "✅ Low Risk"
+            result = "🚨 High Risk" if pred[0] > 0.5 else "✅ Low Risk"
             st.success(result)
         else:
-            st.error("Risk model not loaded.")
+            st.error("Risk model not loaded or XGBoost missing.")
 
-# LOS
 elif page == "🏥 Length of Stay Prediction":
     st.header("🏥 Predict Length of Stay (LOS)")
     age = st.number_input("Age", 0, 120, 50)
@@ -179,31 +179,8 @@ elif page == "🏥 Length of Stay Prediction":
             pred = model.predict(X)
             st.success(f"🕓 Estimated Stay: {float(pred[0]):.2f} days")
         else:
-            st.error("LOS model not loaded.")
+            st.error("LOS model not loaded or XGBoost missing.")
 
-# Clustering
-elif page == "👥 Patient Clustering":
-    st.header("👥 Patient Clustering (KMeans + PCA)")
-    df = pd.read_csv("data/tabular_complete.csv") if os.path.exists("data/tabular_complete.csv") else pd.DataFrame(np.random.randn(100, 4), columns=["A","B","C","D"])
-    kmeans = KMeans(n_clusters=3, random_state=0)
-    df["Cluster"] = kmeans.fit_predict(df)
-    pca = PCA(n_components=2)
-    reduced = pca.fit_transform(df.select_dtypes(include=np.number))
-    fig, ax = plt.subplots()
-    ax.scatter(reduced[:, 0], reduced[:, 1], c=df["Cluster"], cmap="viridis")
-    st.pyplot(fig)
-
-# Association Rules
-elif page == "🔗 Association Rule Mining":
-    st.header("🔗 Association Rule Mining (Apriori)")
-    df = pd.read_csv("data/transactions.csv") if os.path.exists("data/transactions.csv") else pd.DataFrame({"Items":["apple,banana","banana,carrot","apple,carrot"]})
-    df["Items"] = df["Items"].apply(lambda x: x.split(","))
-    te = TransactionEncoder()
-    t_df = pd.DataFrame(te.fit(df["Items"]).transform(df["Items"]), columns=te.columns_)
-    rules = association_rules(apriori(t_df, min_support=0.2, use_colnames=True), metric="lift", min_threshold=1)
-    st.dataframe(rules.head(10))
-
-# CNN Imaging
 elif page == "🧠 CNN Imaging Diagnostics":
     st.header("🧠 CNN Imaging Diagnostics (Grad-CAM)")
     img_file = st.file_uploader("Upload a Chest X-ray Image", type=["jpg", "jpeg", "png"])
@@ -214,7 +191,6 @@ elif page == "🧠 CNN Imaging Diagnostics":
         pred = model.predict(arr)
         label = "⚠️ Pneumonia Detected" if np.argmax(pred) == 1 else "✅ Normal"
         st.image(image, caption=f"Prediction: {label}", width=300)
-        # Grad-CAM heatmap
         heatmap = grad_cam(arr, model)
         if heatmap is not None:
             overlay = overlay_heatmap(image, heatmap)
@@ -222,7 +198,6 @@ elif page == "🧠 CNN Imaging Diagnostics":
     elif not model:
         st.error("CNN model not loaded.")
 
-# LSTM
 elif page == "📊 LSTM Vitals Forecast":
     st.header("📊 LSTM Vitals Forecast (Predicted vs Actual Plot)")
     df = pd.read_csv("data/vitals.csv") if os.path.exists("data/vitals.csv") else pd.DataFrame({
@@ -239,10 +214,7 @@ elif page == "📊 LSTM Vitals Forecast":
         ax.legend()
         st.pyplot(fig)
         st.success(f"Predicted Next Heart Rate: {pred[0][0]:.2f}")
-    else:
-        st.error("LSTM model not loaded.")
 
-# Chatbot
 elif page == "💬 Gemini Chatbot":
     st.header("💬 Gemini Chatbot")
     query = st.text_input("Ask your medical question:")
@@ -250,12 +222,11 @@ elif page == "💬 Gemini Chatbot":
         api_key = st.secrets.get("GENAI_API_KEY")
         if api_key:
             genai.configure(api_key=api_key)
-            response = genai.generate_content(f"You are a medical expert assistant. {query}")
+            response = genai.generate_content(f"You are a healthcare assistant. {query}")
             st.write(response.text)
         else:
             st.error("Gemini API key not found in secrets.")
 
-# Translator
 elif page == "🌐 Translator":
     st.header("🌐 Translator")
     text = st.text_area("Enter text to translate")
@@ -266,7 +237,6 @@ elif page == "🌐 Translator":
         result = trans.translate(text, dest=dest)
         st.success(result.text)
 
-# Sentiment
 elif page == "❤️ Sentiment Analysis":
     st.header("❤️ Sentiment Analysis (Patient Feedback)")
     text = st.text_area("Enter patient feedback")
