@@ -1,4 +1,6 @@
 import os
+os.environ["WATCHDOG_MAX_INSTANCES"] = "1"
+
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -17,7 +19,7 @@ import xgboost as xgb
 # ================================
 st.set_page_config(page_title="💊 HealthAI - Smart Healthcare Assistant", layout="wide")
 st.title("💊 HealthAI - Smart Healthcare Assistant")
-st.caption("AI-powered health prediction and chatbot using Gemini + Deep Learning")
+st.caption("AI-powered multimodal healthcare assistant — Risk, LOS, CNN, LSTM, Sentiment & Chatbot")
 
 os.makedirs("models", exist_ok=True)
 
@@ -37,6 +39,8 @@ def download_model(url, filename):
     path = f"models/{filename}"
     try:
         gdown.download(url, path, quiet=False, fuzzy=True)
+        if os.path.exists(path):
+            st.write(f"✅ {filename} downloaded.")
     except Exception as e:
         st.warning(f"⚠️ Failed to download {filename}: {e}")
     return path
@@ -118,20 +122,40 @@ with tabs[1]:
     # LSTM MODEL
     with c2:
         st.subheader("📈 LSTM — Health Metric Forecast")
+
         timesteps = np.arange(20)
         synthetic = np.sin(timesteps) + np.random.normal(0, 0.1, 20)
         scaled = models["lstm_scaler"].transform(synthetic.reshape(-1, 1))
-        X = scaled.reshape(1, scaled.shape[0], 1)
-        pred = models["lstm"].predict(X)
-        val = models["lstm_scaler"].inverse_transform(pred)[0][0]
-        st.metric("Forecasted Health Metric", f"{val:.2f}")
 
-        # Plot
-        fig, ax = plt.subplots(figsize=(5,3))
-        ax.plot(timesteps, synthetic, label="Input Data")
-        ax.axhline(val, color='red', linestyle='--', label='Prediction')
-        ax.legend()
-        st.pyplot(fig)
+        try:
+            input_shape = models["lstm"].input_shape  # (None, timesteps, features)
+            time_steps = input_shape[1] if input_shape[1] else scaled.shape[0]
+            n_features = input_shape[2] if input_shape[2] else 1
+
+            # Pad or trim sequence
+            if scaled.shape[0] < time_steps:
+                pad_len = time_steps - scaled.shape[0]
+                scaled = np.pad(scaled, ((0, pad_len), (0, 0)), mode='edge')
+            elif scaled.shape[0] > time_steps:
+                scaled = scaled[:time_steps]
+
+            # Adjust feature count
+            if n_features > 1:
+                scaled = np.repeat(scaled, n_features, axis=1)
+
+            X = scaled.reshape(1, time_steps, n_features)
+            pred = models["lstm"].predict(X)
+            val = models["lstm_scaler"].inverse_transform(pred)[0][0]
+            st.metric("Forecasted Health Metric", f"{val:.2f}")
+
+            # Plot
+            fig, ax = plt.subplots(figsize=(5,3))
+            ax.plot(range(time_steps), scaled[:,0], label="Input Signal")
+            ax.axhline(val, color='r', linestyle='--', label='Forecast')
+            ax.legend()
+            st.pyplot(fig)
+        except Exception as e:
+            st.error(f"⚠️ LSTM model shape mismatch: {e}")
 
 # ================================
 # TAB 3 - CHATBOT
@@ -170,4 +194,4 @@ with tabs[4]:
     fig, ax = plt.subplots()
     sns.boxplot(x="Risk", y="LOS", data=data, ax=ax)
     st.pyplot(fig)
-    st.info("Insight: High-risk patients generally stay longer.")
+    st.info("🧠 Insight: High-risk patients generally stay longer.")
