@@ -97,7 +97,8 @@ with tabs[0]:
     if st.button("Predict Length of Stay"):
         scaled = models["los_scaler"].transform(features)
         los_pred = models["los"].predict(scaled)
-        los_days = models["los_scaler"].inverse_transform(los_pred.reshape(-1, 1))[0][0]
+        # ✅ Fixed line
+        los_days = float(models["los_scaler"].inverse_transform(np.array(los_pred).reshape(-1, 1))[0][0])
         st.metric("Predicted Stay Duration", f"{los_days:.1f} Days")
 
 # ================================
@@ -135,7 +136,7 @@ with tabs[1]:
         scaled = models["lstm_scaler"].transform(synthetic.reshape(-1, 1))
 
         try:
-            input_shape = models["lstm"].input_shape  # (None, timesteps, features)
+            input_shape = models["lstm"].input_shape
             time_steps = input_shape[1] if input_shape[1] else scaled.shape[0]
             n_features = input_shape[2] if input_shape[2] else 1
 
@@ -169,7 +170,6 @@ with tabs[2]:
 
     query = st.text_area("Ask me anything (in any language):")
     if query:
-        # Auto translate to English
         try:
             query_en = GoogleTranslator(source="auto", target="en").translate(query)
         except:
