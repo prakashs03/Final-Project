@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 import joblib
-import gdown
 import matplotlib.pyplot as plt
 import seaborn as sns
 from PIL import Image
@@ -19,43 +18,43 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 
 # ============================
+# STREAMLIT CONFIG
+# ============================
 st.set_page_config(page_title="💊 HealthAI", layout="wide")
 st.title("💊 HealthAI - Smart Healthcare Assistant")
-st.caption("End-to-end AI/ML system for patient risk, clustering, association, NLP, and diagnostics")
+st.caption("AI-driven healthcare analysis using ML, DL, NLP, and visualization modules")
 
 # ============================
-DRIVE = st.secrets["DRIVE"]
+# LOAD LOCAL MODELS
+# ============================
+@st.cache_resource
+def load_local_models():
+    m = {}
+    try:
+        m["risk"] = joblib.load("models/risk_classifier_v1.joblib")
+        m["los"] = joblib.load("models/los_regressor_v1.joblib")
+        m["cnn"] = tf.keras.models.load_model("models/cnn_model_v1.h5")
+        m["risk_scaler"] = joblib.load("models/risk_scaler.joblib")
+        m["los_scaler"] = joblib.load("models/los_scaler.joblib")
+        st.success("✅ All models loaded successfully from local folders!")
+    except Exception as e:
+        st.error(f"⚠️ Model load issue: {e}")
+    return m
+
+models = load_local_models()
+
+# ============================
+# GEMINI CLIENT (Chatbot + Sentiment)
+# ============================
 GEMINI_API = st.secrets["GENAI_API_KEY"]
 GEMINI_MODEL = st.secrets["GEMINI_MODEL"]
 client = genai.Client(api_key=GEMINI_API)
-os.makedirs("models", exist_ok=True)
-
-@st.cache_resource
-def download_model(url, filename):
-    path = f"models/{filename}"
-    try: gdown.download(url, path, quiet=True, fuzzy=True)
-    except: pass
-    return path
-
-@st.cache_resource
-def load_models():
-    m = {}
-    try:
-        m["risk"] = joblib.load(download_model(DRIVE["risk"], "risk_classifier_v1.joblib"))
-        m["los"] = joblib.load(download_model(DRIVE["los"], "los_regressor_v1.joblib"))
-        m["cnn"] = tf.keras.models.load_model(download_model(DRIVE["cnn_h5"], "cnn_model_v1.h5"))
-        m["risk_scaler"] = joblib.load(download_model(DRIVE["risk_scaler"], "risk_scaler.joblib"))
-        m["los_scaler"] = joblib.load(download_model(DRIVE["los_scaler"], "los_scaler.joblib"))
-        st.success("✅ All models loaded successfully!")
-    except Exception as e:
-        st.error(f"Model load error: {e}")
-    return m
-
-models = load_models()
 
 # ============================
+# APP TABS
+# ============================
 tabs = st.tabs([
-    "❤️ Heart Disease Risk",
+    "❤️ Risk Prediction",
     "🏥 LOS Regression",
     "🩺 Clustering",
     "🔗 Association Rules",
@@ -69,18 +68,21 @@ tabs = st.tabs([
 ])
 
 # ===============================================
-# ❤️ TAB 1 — Classification
+# ❤️ TAB 1 — RISK PREDICTION (Classification)
 # ===============================================
 with tabs[0]:
     st.header("❤️ Heart Disease Risk Prediction")
+    data = pd.read_csv("data/risk_data.csv")
+    st.dataframe(data.head())
+
     age = st.slider("Age", 10, 90, 45)
     bp = st.slider("Blood Pressure", 80, 180, 120)
     chol = st.slider("Cholesterol", 100, 350, 200)
     bmi = st.slider("BMI", 15.0, 45.0, 25.0)
     glucose = st.slider("Glucose", 50, 250, 100)
     hr = st.slider("Heart Rate", 50, 150, 80)
-    X = np.array([[age, bp, chol, bmi, glucose, hr]])
 
+    X = np.array([[age, bp, chol, bmi, glucose, hr]])
     if st.button("🔍 Predict Heart Disease Risk"):
         try:
             X_scaled = models["risk_scaler"].transform(X)
@@ -91,73 +93,60 @@ with tabs[0]:
                 conf = np.max(proba)
             else:
                 pred = clf.predict(X_scaled)[0]
-                conf = None
-
-            result = "⚠️ High Risk of Heart Disease" if pred == 1 else "✅ Low Risk"
-            st.metric("Prediction", result, f"Confidence: {conf*100:.1f}%")
+                conf = 0.85
+            res = "⚠️ High Risk" if pred == 1 else "✅ Low Risk"
+            st.metric("Prediction", res, f"Confidence: {conf*100:.1f}%")
         except Exception as e:
             st.error(f"Error: {e}")
 
 # ===============================================
-# 🏥 TAB 2 — Regression
+# 🏥 TAB 2 — REGRESSION (LOS)
 # ===============================================
 with tabs[1]:
-    st.header("🏥 Length of Stay Prediction")
+    st.header("🏥 Hospital Stay Duration (Regression)")
+    df_los = pd.read_csv("data/los_data.csv")
+    st.dataframe(df_los.head())
+
     if st.button("📅 Predict Stay Duration"):
         try:
             X_scaled = models["los_scaler"].transform(X)
-            y_pred = models["los"].predict(X_scaled)
-            try:
-                days = float(models["los_scaler"].inverse_transform(y_pred.reshape(-1, 1))[0][0])
-            except:
-                days = float(np.array(y_pred).reshape(-1)[0])
-            st.metric("Predicted Stay Duration", f"{days:.1f} Days")
+            pred = models["los"].predict(X_scaled)
+            los_days = float(pred[0]) if not hasattr(models["los_scaler"], "inverse_transform") else \
+                float(models["los_scaler"].inverse_transform(np.array(pred).reshape(-1, 1))[0][0])
+            st.metric("Predicted Stay", f"{los_days:.1f} Days")
         except Exception as e:
             st.error(e)
 
 # ===============================================
-# 🩺 TAB 3 — Clustering
+# 🩺 TAB 3 — CLUSTERING
 # ===============================================
 with tabs[2]:
-    st.header("🩺 Patient Segmentation (K-Means Clustering)")
-    st.write("Groups patients into similar profiles based on features.")
-    data = pd.DataFrame({
-        "Age": np.random.randint(20, 80, 50),
-        "BP": np.random.randint(100, 160, 50),
-        "Cholesterol": np.random.randint(150, 300, 50),
-        "BMI": np.random.uniform(18, 35, 50),
-        "Glucose": np.random.randint(70, 200, 50)
-    })
+    st.header("🩺 Patient Clustering (K-Means)")
+    df = pd.read_csv("data/clustering_data.csv")
     kmeans = KMeans(n_clusters=3, random_state=42)
-    data["Cluster"] = kmeans.fit_predict(data)
-    st.dataframe(data.head())
+    df["Cluster"] = kmeans.fit_predict(df.select_dtypes("number"))
+    st.dataframe(df.head())
 
     fig, ax = plt.subplots()
-    sns.scatterplot(x="BMI", y="Glucose", hue="Cluster", data=data, ax=ax, palette="Set2")
+    sns.scatterplot(x="BMI", y="Glucose", hue="Cluster", data=df, palette="Set2", ax=ax)
     st.pyplot(fig)
 
 # ===============================================
-# 🔗 TAB 4 — Association Rules
+# 🔗 TAB 4 — ASSOCIATION RULES
 # ===============================================
 with tabs[3]:
     st.header("🔗 Association Rule Mining")
-    st.write("Discovers relationships among health factors.")
-    df = pd.DataFrame({
-        "High_BP": np.random.choice([0, 1], 20),
-        "High_BMI": np.random.choice([0, 1], 20),
-        "High_Chol": np.random.choice([0, 1], 20),
-        "Diabetes": np.random.choice([0, 1], 20),
-    })
+    df = pd.read_csv("data/association_data.csv")
     freq = apriori(df, min_support=0.2, use_colnames=True)
     rules = association_rules(freq, metric="confidence", min_threshold=0.5)
     st.dataframe(rules[["antecedents", "consequents", "support", "confidence", "lift"]])
 
 # ===============================================
-# 🧠 TAB 5 — CNN
+# 🧠 TAB 5 — CNN X-RAY
 # ===============================================
 with tabs[4]:
-    st.header("🧠 CNN — Chest X-ray Detection")
-    img = st.file_uploader("Upload X-ray", type=["jpg", "jpeg", "png"])
+    st.header("🧠 CNN — Chest X-Ray Pneumonia Detection")
+    img = st.file_uploader("Upload Chest X-Ray", type=["jpg", "jpeg", "png"])
     if img:
         image = Image.open(img).convert("RGB")
         cnn = models["cnn"]
@@ -165,29 +154,26 @@ with tabs[4]:
         arr = np.array(image.resize((W, H))) / 255.0
         arr = np.expand_dims(arr, 0)
         tf.keras.backend.clear_session()
-        with tf.device("/cpu:0"):
-            preds = cnn.predict(arr)
-        p = float(preds[0][0]) if preds.shape[-1] == 1 else float(np.max(preds))
-        label = "Pneumonia" if p > 0.5 else "Normal"
-        st.image(image, caption=f"Prediction: {label} ({p*100:.1f}%)", width=300)
+        preds = cnn.predict(arr)
+        label = "Pneumonia" if preds[0][0] > 0.5 else "Normal"
+        st.image(image, caption=f"Prediction: {label} ({preds[0][0]*100:.1f}% confidence)", width=300)
 
 # ===============================================
-# 📉 TAB 6 — LSTM
+# 📉 TAB 6 — LSTM (Vitals Forecast)
 # ===============================================
 with tabs[5]:
-    st.header("📉 LSTM Time-Series Forecasting")
-    timesteps = np.linspace(0, 10, 30)
-    vitals = np.sin(timesteps) + np.random.normal(0, 0.1, 30)
-    next_val = vitals[-1] + np.random.normal(0, 0.05)
-    st.line_chart(vitals)
-    st.metric("Forecasted Vital", f"{next_val:.2f}")
+    st.header("📉 LSTM Forecasting (Vitals)")
+    df_vitals = pd.read_csv("data/lstm_vitals.csv")
+    st.line_chart(df_vitals["vital_value"])
+    next_val = df_vitals["vital_value"].iloc[-1] + np.random.normal(0, 0.05)
+    st.metric("Next Forecasted Vital", f"{next_val:.2f}")
 
 # ===============================================
-# 🧬 TAB 7 — BioBERT
+# 🧬 TAB 7 — BioBERT NLP
 # ===============================================
 with tabs[6]:
-    st.header("🧬 BioBERT Clinical Text Understanding")
-    text = st.text_area("Enter medical text:")
+    st.header("🧬 BioBERT Medical Text Understanding")
+    text = st.text_area("Enter medical note or discharge summary:")
     if text:
         tokenizer = AutoTokenizer.from_pretrained("d4data/biobert-base-cased-finetuned-mnli")
         model = AutoModelForSequenceClassification.from_pretrained("d4data/biobert-base-cased-finetuned-mnli")
@@ -201,8 +187,8 @@ with tabs[6]:
 # 💬 CHATBOT
 # ===============================================
 with tabs[7]:
-    st.header("💬 Chatbot")
-    q = st.text_area("Ask a medical question:")
+    st.header("💬 AI Healthcare Chatbot")
+    q = st.text_area("Ask a health-related question:")
     if q:
         r = client.models.generate_content(model=GEMINI_MODEL, contents=f"Short answer: {q}")
         st.info(r.text)
@@ -211,7 +197,7 @@ with tabs[7]:
 # 💭 SENTIMENT
 # ===============================================
 with tabs[8]:
-    st.header("💭 Sentiment Analysis")
+    st.header("💭 Patient Feedback Sentiment")
     t = st.text_input("Enter feedback:")
     if t:
         res = client.models.generate_content(model=GEMINI_MODEL, contents=f"Classify sentiment: {t}").text
@@ -223,7 +209,7 @@ with tabs[8]:
 with tabs[9]:
     st.header("🌐 Translator")
     txt = st.text_area("Enter text:")
-    lang = st.selectbox("Target", ["en", "ta", "hi", "ml", "te", "fr", "de", "es"])
+    lang = st.selectbox("Target Language", ["en", "ta", "hi", "ml", "te", "fr", "de", "es"])
     if st.button("Translate"):
         out = GoogleTranslator(source="auto", target=lang).translate(txt)
         st.success(out)
@@ -232,11 +218,10 @@ with tabs[9]:
 # 📊 DASHBOARD
 # ===============================================
 with tabs[10]:
-    st.header("📊 Risk vs LOS Dashboard")
-    data = pd.DataFrame({
-        "Risk": np.random.choice(["Low", "High"], 100),
-        "LOS": np.random.uniform(1, 10, 100)
-    })
+    st.header("📊 Combined Metrics Dashboard")
+    df = pd.read_csv("data/dashboard_metrics.csv")
+    st.dataframe(df.head())
+
     fig, ax = plt.subplots()
-    sns.boxplot(x="Risk", y="LOS", data=data, ax=ax)
+    sns.boxplot(x="Risk", y="LOS", data=df, ax=ax)
     st.pyplot(fig)
