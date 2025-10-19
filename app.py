@@ -15,11 +15,11 @@ from google import genai
 import xgboost as xgb
 
 # ================================
-# CONFIGURATION
+# CONFIG
 # ================================
 st.set_page_config(page_title="💊 HealthAI - Smart Healthcare Assistant", layout="wide")
 st.title("💊 HealthAI - Smart Healthcare Assistant")
-st.caption("AI-powered multimodal healthcare assistant — Risk, LOS, CNN, LSTM, Sentiment & Chatbot")
+st.caption("AI-powered multimodal healthcare assistant — Risk, LOS, CNN, LSTM, Sentiment, Chatbot & Translation")
 
 os.makedirs("models", exist_ok=True)
 
@@ -46,7 +46,7 @@ def download_model(url, filename):
     return path
 
 # ================================
-# LOAD MODELS SAFELY
+# LOAD MODELS
 # ================================
 @st.cache_resource
 def load_models():
@@ -71,7 +71,7 @@ models = load_models()
 # ================================
 # STREAMLIT TABS
 # ================================
-tabs = st.tabs(["🏥 Risk & LOS", "🧠 Deep Learning (CNN & LSTM)", "💬 Chatbot", "💭 Sentiment", "📊 Dashboard"])
+tabs = st.tabs(["🏥 Risk & LOS", "🧠 CNN & LSTM", "💬 Chatbot", "💭 Sentiment", "🌐 Translator", "📊 Dashboard"])
 
 # ================================
 # TAB 1 - RISK & LOS
@@ -97,8 +97,11 @@ with tabs[0]:
     if st.button("Predict Length of Stay"):
         scaled = models["los_scaler"].transform(features)
         los_pred = models["los"].predict(scaled)
-        # ✅ Fixed line
-        los_days = float(models["los_scaler"].inverse_transform(np.array(los_pred).reshape(-1, 1))[0][0])
+        # ✅ FIXED: no inverse_transform (6 features vs 1 output)
+        try:
+            los_days = float(los_pred[0])
+        except Exception:
+            los_days = float(np.array(los_pred).reshape(-1)[0])
         st.metric("Predicted Stay Duration", f"{los_days:.1f} Days")
 
 # ================================
@@ -109,9 +112,9 @@ with tabs[1]:
 
     c1, c2 = st.columns(2)
 
-    # CNN MODEL
+    # CNN
     with c1:
-        st.subheader("🩻 CNN — X-Ray Diagnosis")
+        st.subheader("🩻 CNN — X-Ray Classification")
         img = st.file_uploader("Upload Chest X-ray", type=["jpg", "jpeg", "png"])
         if img:
             image = Image.open(img).convert("RGB").resize((128, 128))
@@ -127,7 +130,7 @@ with tabs[1]:
             else:
                 st.warning(f"🤔 Uncertain — Confidence: {confidence*100:.1f}%")
 
-    # LSTM MODEL
+    # LSTM
     with c2:
         st.subheader("📈 LSTM — Health Metric Forecast")
 
@@ -160,7 +163,7 @@ with tabs[1]:
             ax.legend()
             st.pyplot(fig)
         except Exception as e:
-            st.error(f"⚠️ LSTM model shape mismatch: {e}")
+            st.error(f"⚠️ LSTM model issue: {e}")
 
 # ================================
 # TAB 3 - CHATBOT
@@ -201,10 +204,9 @@ with tabs[2]:
 # TAB 4 - SENTIMENT
 # ================================
 with tabs[3]:
-    st.header("💭 Sentiment Analyzer — Patient Feedback")
+    st.header("💭 Sentiment Analysis — Patient Feedback")
 
     feedback = st.text_input("Enter feedback:")
-
     if st.button("Analyze Sentiment"):
         if feedback.strip() == "":
             st.warning("Please enter some feedback.")
@@ -212,7 +214,7 @@ with tabs[3]:
             try:
                 gemini_sentiment = client.models.generate_content(
                     model=GEMINI_MODEL,
-                    contents=f"Classify the sentiment of this sentence as Positive, Negative, or Neutral: {feedback}"
+                    contents=f"Classify sentiment of this sentence as Positive, Negative, or Neutral: {feedback}"
                 )
                 response = gemini_sentiment.text.strip()
                 if "Positive" in response:
@@ -228,9 +230,23 @@ with tabs[3]:
                 st.metric("Sentiment", sentiment)
 
 # ================================
-# TAB 5 - DASHBOARD
+# TAB 5 - TRANSLATOR
 # ================================
 with tabs[4]:
+    st.header("🌐 Translator — Multilingual Support")
+    text = st.text_area("Enter text to translate:")
+    lang = st.selectbox("Select language", ["en", "ta", "hi", "ml", "te", "fr", "de", "es"])
+    if st.button("Translate"):
+        try:
+            translated = GoogleTranslator(source="auto", target=lang).translate(text)
+            st.success(f"🔤 Translated ({lang}): {translated}")
+        except Exception as e:
+            st.warning(f"Translation failed: {e}")
+
+# ================================
+# TAB 6 - DASHBOARD
+# ================================
+with tabs[5]:
     st.header("📊 Dashboard — Risk & Stay Comparison")
     data = pd.DataFrame({
         "Risk": np.random.choice(["Low", "High"], 100),
