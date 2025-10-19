@@ -8,7 +8,6 @@ joblib
 matplotlib
 seaborn
 Pillow
-gdown
 deep-translator
 google-genai
 mlxtend
