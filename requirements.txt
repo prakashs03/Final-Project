@@ -11,3 +11,6 @@ Pillow
 gdown
 deep-translator
 google-genai
+mlxtend
+transformers
+torch
