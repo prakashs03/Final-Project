@@ -15,10 +15,14 @@ from google import genai
 import json, pathlib
 
 # ============================
+# STREAMLIT CONFIG
+# ============================
 st.set_page_config(page_title="💊 HealthAI", layout="wide")
 st.title("💊 HealthAI - Smart Healthcare Assistant")
 st.caption("AI-powered multimodal healthcare system — Heart Risk, LOS, CNN, LSTM, Chatbot, Sentiment & Translation")
 
+# ============================
+# GOOGLE DRIVE + GEMINI
 # ============================
 DRIVE = st.secrets["DRIVE"]
 GEMINI_API = st.secrets["GENAI_API_KEY"]
@@ -27,13 +31,17 @@ client = genai.Client(api_key=GEMINI_API)
 os.makedirs("models", exist_ok=True)
 
 # ============================
+# DOWNLOAD & LOAD MODELS
+# ============================
 @st.cache_resource
 def download_model(url, filename):
     path = f"models/{filename}"
     try:
         gdown.download(url, path, quiet=True, fuzzy=True)
-    except: pass
+    except:
+        pass
     return path
+
 
 @st.cache_resource
 def load_models():
@@ -44,13 +52,17 @@ def load_models():
         m["cnn"] = tf.keras.models.load_model(download_model(DRIVE["cnn_h5"], "cnn_model_v1.h5"))
         m["risk_scaler"] = joblib.load(download_model(DRIVE["risk_scaler"], "risk_scaler.joblib"))
         m["los_scaler"] = joblib.load(download_model(DRIVE["los_scaler"], "los_scaler.joblib"))
-        st.success("✅ Models loaded successfully!")
+        st.success("✅ All models loaded successfully!")
     except Exception as e:
         st.error(f"Model load error: {e}")
     return m
 
+
 models = load_models()
 
+# ============================
+# TABS
+# ============================
 tabs = st.tabs(["❤️ Heart Disease Risk", "🧠 CNN X-Ray", "💬 Chatbot", "💭 Sentiment", "🌐 Translator", "📊 Dashboard"])
 
 # ===============================================
@@ -81,7 +93,7 @@ with tabs[0]:
 
             result = "⚠️ High Risk of Heart Disease" if pred == 1 else "✅ Low Risk of Heart Disease"
             if conf:
-                st.metric("Prediction", f"{result}", f"Confidence: {conf*100:.1f}%")
+                st.metric("Prediction", result, f"Confidence: {conf*100:.1f}%")
             else:
                 st.metric("Prediction", result)
         except Exception as e:
@@ -112,22 +124,27 @@ with tabs[1]:
         cnn = models["cnn"]
         _, H, W, C = cnn.input_shape
         arr = np.array(image.resize((W, H))) / 255.0
-        if arr.ndim == 2: arr = np.stack([arr]*3, axis=-1)
+        if arr.ndim == 2:
+            arr = np.stack([arr] * 3, axis=-1)
         arr = np.expand_dims(arr, 0)
 
-        preds = cnn.predict(arr)
-        if preds.shape[-1] == 1:  # sigmoid
+        # ✅ Fix: clear session before prediction to avoid Keras name_scope error
+        tf.keras.backend.clear_session()
+        with tf.device("/cpu:0"):
+            preds = cnn.predict(arr)
+
+        if preds.shape[-1] == 1:  # sigmoid output
             p = float(preds[0][0])
-            p = 1/(1+np.exp(-p)) if p < 0 or p > 1 else p
+            p = 1 / (1 + np.exp(-p)) if p < 0 or p > 1 else p
             label = 1 if p >= 0.5 else 0
-            conf = p if label == 1 else 1-p
+            conf = p if label == 1 else 1 - p
         else:
             label = np.argmax(preds)
             conf = float(np.max(preds))
 
-        # 🔁 Auto-correct if model inverted (detected in first few runs)
+        # 🔁 Auto-correct if model inverted
         if conf > 0.95 and label == 1 and np.mean(preds) > 0.8:
-            label = 0  # flip (model inverted)
+            label = 0  # flip if suspiciously biased
 
         diagnosis = class_names[label]
         st.image(image, caption=f"Prediction: {diagnosis} ({conf*100:.1f}% confidence)", width=300)
@@ -172,9 +189,12 @@ with tabs[3]:
         else:
             try:
                 res = client.models.generate_content(model=GEMINI_MODEL, contents=f"Classify sentiment as Positive, Negative, or Neutral: {t}").text
-                if "Positive" in res: st.metric("Sentiment", "Positive 😊")
-                elif "Negative" in res: st.metric("Sentiment", "Negative 😞")
-                else: st.metric("Sentiment", "Neutral 😐")
+                if "Positive" in res:
+                    st.metric("Sentiment", "Positive 😊")
+                elif "Negative" in res:
+                    st.metric("Sentiment", "Negative 😞")
+                else:
+                    st.metric("Sentiment", "Neutral 😐")
             except Exception:
                 vec = models["sentiment_vectorizer"].transform([t])
                 pred = models["sentiment_model"].predict(vec)[0]
