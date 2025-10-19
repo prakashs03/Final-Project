@@ -7,7 +7,7 @@ tensorflow
 joblib
 matplotlib
 seaborn
-gdown
 Pillow
+gdown
 deep-translator
 google-genai
