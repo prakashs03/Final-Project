@@ -96,8 +96,9 @@ with tabs[0]:
 
     if st.button("Predict Length of Stay"):
         scaled = models["los_scaler"].transform(features)
-        los_pred = models["los"].predict(scaled)[0]
-        st.metric("Predicted Stay Duration", f"{los_pred:.2f} Days")
+        los_pred = models["los"].predict(scaled)
+        los_days = models["los_scaler"].inverse_transform(los_pred.reshape(-1, 1))[0][0]
+        st.metric("Predicted Stay Duration", f"{los_days:.1f} Days")
 
 # ================================
 # TAB 2 - CNN & LSTM
@@ -115,9 +116,15 @@ with tabs[1]:
             image = Image.open(img).convert("RGB").resize((128, 128))
             st.image(image, width=250)
             arr = np.expand_dims(np.array(image) / 255.0, axis=0)
-            pred = models["cnn"].predict(arr)
-            result = "Pneumonia 🫁" if np.argmax(pred) == 1 else "Normal ✅"
-            st.success(f"CNN Result: {result}")
+            preds = models["cnn"].predict(arr)
+            confidence = np.max(preds)
+            label = np.argmax(preds)
+            if label == 1 and confidence > 0.6:
+                st.success(f"🫁 Pneumonia Detected ({confidence*100:.1f}% confidence)")
+            elif label == 0 and confidence > 0.6:
+                st.success(f"✅ Normal ({confidence*100:.1f}% confidence)")
+            else:
+                st.warning(f"🤔 Uncertain — Confidence: {confidence*100:.1f}%")
 
     # LSTM MODEL
     with c2:
@@ -132,14 +139,12 @@ with tabs[1]:
             time_steps = input_shape[1] if input_shape[1] else scaled.shape[0]
             n_features = input_shape[2] if input_shape[2] else 1
 
-            # Pad or trim sequence
             if scaled.shape[0] < time_steps:
                 pad_len = time_steps - scaled.shape[0]
                 scaled = np.pad(scaled, ((0, pad_len), (0, 0)), mode='edge')
             elif scaled.shape[0] > time_steps:
                 scaled = scaled[:time_steps]
 
-            # Adjust feature count
             if n_features > 1:
                 scaled = np.repeat(scaled, n_features, axis=1)
 
@@ -148,7 +153,6 @@ with tabs[1]:
             val = models["lstm_scaler"].inverse_transform(pred)[0][0]
             st.metric("Forecasted Health Metric", f"{val:.2f}")
 
-            # Plot
             fig, ax = plt.subplots(figsize=(5,3))
             ax.plot(range(time_steps), scaled[:,0], label="Input Signal")
             ax.axhline(val, color='r', linestyle='--', label='Forecast')
@@ -162,25 +166,66 @@ with tabs[1]:
 # ================================
 with tabs[2]:
     st.header("💬 Gemini Healthcare Chatbot")
-    query = st.text_area("Ask me anything about health or wellness:")
-    if st.button("Ask Gemini"):
+
+    query = st.text_area("Ask me anything (in any language):")
+    if query:
+        # Auto translate to English
         try:
-            resp = client.models.generate_content(model=GEMINI_MODEL, contents=query)
-            st.success(resp.text)
-        except Exception as e:
-            st.error(f"Gemini error: {e}")
+            query_en = GoogleTranslator(source="auto", target="en").translate(query)
+        except:
+            query_en = query
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Get Short Answer"):
+                try:
+                    short_resp = client.models.generate_content(
+                        model=GEMINI_MODEL,
+                        contents=f"Give a short, keyword-based medical answer for: {query_en}"
+                    )
+                    st.info(short_resp.text)
+                except Exception as e:
+                    st.error(f"Gemini error: {e}")
+        with col2:
+            if st.button("Explain More"):
+                try:
+                    long_resp = client.models.generate_content(
+                        model=GEMINI_MODEL,
+                        contents=f"Explain in detail about: {query_en}"
+                    )
+                    st.success(long_resp.text)
+                except Exception as e:
+                    st.error(f"Gemini error: {e}")
 
 # ================================
 # TAB 4 - SENTIMENT
 # ================================
 with tabs[3]:
     st.header("💭 Sentiment Analyzer — Patient Feedback")
+
     feedback = st.text_input("Enter feedback:")
+
     if st.button("Analyze Sentiment"):
-        vec = models["sentiment_vectorizer"].transform([feedback])
-        pred = models["sentiment_model"].predict(vec)[0]
-        sentiment = "Positive 😊" if pred == 1 else "Negative 😞"
-        st.metric("Sentiment", sentiment)
+        if feedback.strip() == "":
+            st.warning("Please enter some feedback.")
+        else:
+            try:
+                gemini_sentiment = client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=f"Classify the sentiment of this sentence as Positive, Negative, or Neutral: {feedback}"
+                )
+                response = gemini_sentiment.text.strip()
+                if "Positive" in response:
+                    st.metric("Sentiment", "Positive 😊")
+                elif "Negative" in response:
+                    st.metric("Sentiment", "Negative 😞")
+                else:
+                    st.metric("Sentiment", "Neutral 😐")
+            except Exception:
+                vec = models["sentiment_vectorizer"].transform([feedback])
+                pred = models["sentiment_model"].predict(vec)[0]
+                sentiment = "Positive 😊" if pred == 1 else "Negative 😞"
+                st.metric("Sentiment", sentiment)
 
 # ================================
 # TAB 5 - DASHBOARD
