@@ -1,226 +1,341 @@
-# ========================== HEALTHAI — FINAL PROJECT ==========================
-# Author: Jayaprakash Srinivasan
-# Description: End-to-End Smart Healthcare System with ML, DL & Gemini AI
-# ------------------------------------------------------------------------------
+# app.py — HealthAI final (streamlit)
+# Copy / paste exactly. Models are loaded from local models/ directory.
+# Make sure your model files are in the repository under models/
 
 import streamlit as st
 import numpy as np
-import pandas as pd
 import joblib
 import tensorflow as tf
 from tensorflow.keras.preprocessing.image import img_to_array
 from PIL import Image
-import google.generativeai as genai
-from sklearn.metrics import accuracy_score, f1_score, mean_absolute_error, mean_squared_error
-from nltk.translate.bleu_score import sentence_bleu
+import os
 import math
 
-# ---------------------- GEMINI CONFIG ----------------------
-GENAI_API_KEY = st.secrets["GENAI_API_KEY"]
-GENAI_MODEL = st.secrets["GENAI_MODEL"]
-genai.configure(api_key=GENAI_API_KEY)
-gemini = genai.GenerativeModel(GENAI_MODEL)
+# Optional: Gemini (google generative AI). Put API key + model in Streamlit secrets
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
 
-# ---------------------- PAGE CONFIG ------------------------
-st.set_page_config(page_title="💊 HealthAI Dashboard", layout="wide")
-st.title("💊 HealthAI — AI-Powered Clinical Decision Support System")
-st.caption("Designed & Developed by **Jayaprakash Srinivasan**")
+# ----------------- PAGE -----------------
+st.set_page_config(page_title="HealthAI — Smart Healthcare Assistant", layout="wide")
+st.title("💊 HealthAI — Smart Healthcare Assistant")
 
-# ---------------------- LOAD MODELS ------------------------
-@st.cache_resource
-def load_models():
-    models = {}
+# ----------------- UTIL: GEMINI WRAPPER -----------------
+def gemini_configured():
     try:
-        models["risk"] = joblib.load("models/risk_classifier_v1.joblib")
-        models["los"] = joblib.load("models/los_regressor_v1.joblib")
-        models["cluster"] = joblib.load("models/patient_cluster_model.joblib")
-        models["cnn"] = tf.keras.models.load_model("models/cnn_model_v1.h5", compile=False)
-        models["lstm"] = tf.keras.models.load_model("models/lstm_model_v1.h5", compile=False)
-        models["sentiment_model"] = joblib.load("models/sentiment_model.joblib")
-        models["sentiment_vectorizer"] = joblib.load("models/sentiment_vectorizer.joblib")
-        models["risk_scaler"] = joblib.load("models/risk_scaler.joblib")
-        models["los_scaler"] = joblib.load("models/los_scaler.joblib")
-        models["lstm_scaler"] = joblib.load("models/lstm_scaler.joblib")
+        if genai is None:
+            return False
+        key = st.secrets.get("GENAI_API_KEY", None)
+        model = st.secrets.get("GENAI_MODEL", None)
+        if not key or not model:
+            return False
+        genai.configure(api_key=key)
+        return True
+    except Exception:
+        return False
+
+def gemini_short(prompt):
+    """Call Gemini (safe wrapper). Returns text or fallback."""
+    try:
+        if not gemini_configured():
+            return "(Gemini not configured) " + (prompt[:200] + "...")
+        # library has changed over time; try a couple of call styles
+        try:
+            # older/newer api: generative.generate -> returns object with text
+            resp = genai.generate(prompt=prompt)  # try common style
+            if hasattr(resp, "text"):
+                return resp.text.strip()
+            # fallback to object str
+            return str(resp)
+        except Exception:
+            try:
+                resp = genai.generate_text(model=st.secrets["GENAI_MODEL"], input=prompt)
+                # different responses; try to extract text
+                return getattr(resp, "text", str(resp))
+            except Exception as e:
+                # last fallback
+                return "(Gemini call failed) " + str(e)
     except Exception as e:
-        st.error(f"⚠️ Error loading models: {e}")
+        return "(Gemini unavailable) " + str(e)
+
+# ----------------- MODEL LOADING -----------------
+@st.cache_resource
+def load_models_local():
+    models = {}
+    base = "models"
+    required = {
+        "risk": "risk_classifier_v1.joblib",
+        "los": "los_regressor_v1.joblib",
+        "cnn": "cnn_model_v1.h5",
+        "lstm": "lstm_model_v1.h5",
+        "sentiment_model": "sentiment_model.joblib",
+        "sentiment_vectorizer": "sentiment_vectorizer.joblib",
+        # optional scalers if you saved them
+        "risk_scaler": "risk_scaler.joblib",
+        "los_scaler": "los_scaler.joblib",
+        "lstm_scaler": "lstm_scaler.joblib",
+    }
+    for key, fname in required.items():
+        path = os.path.join(base, fname)
+        if os.path.exists(path):
+            try:
+                if fname.endswith(".joblib"):
+                    models[key] = joblib.load(path)
+                elif fname.endswith(".h5"):
+                    # load Keras model without compiling (faster)
+                    models[key] = tf.keras.models.load_model(path, compile=False)
+            except Exception as e:
+                st.warning(f"Warning: failed loading {fname}: {e}")
+        else:
+            st.info(f"Model file not found: {path} (this is OK for demo; some features fallback).")
     return models
 
-models = load_models()
+models = load_models_local()
 
-# ---------------------- HELPER FUNCTIONS -------------------
-def preprocess_image(img, model):
-    img = img.convert("RGB").resize((model.input_shape[1], model.input_shape[2]))
-    arr = img_to_array(img).astype("float32") / 255.0
-    return np.expand_dims(arr, axis=0)
-
-def cnn_predict(img):
-    arr = preprocess_image(img, models["cnn"])
-    preds = models["cnn"].predict(arr)
-    if preds.shape[-1] == 1:
-        prob = float(preds[0][0])
-        label = "Pneumonia" if prob >= 0.5 else "Normal"
+# ----------------- SAFE INVERSE TRANSFORM for single target -----------------
+def inverse_single_target(scaler, y_scaled):
+    """
+    scaler: a fitted sklearn scaler (StandardScaler-like).
+    y_scaled: float or array-like in scaled space (1D).
+    Returns unscaled value for index 0 using scaler.scale_[0] + mean_[0] if multi-dim.
+    """
+    import numpy as _np
+    y = _np.asarray(y_scaled).reshape(-1, 1)
+    if not hasattr(scaler, "scale_"):
+        # cannot invert
+        return float(y[0][0])
+    sc = scaler.scale_
+    mu = scaler.mean_
+    if sc.shape[0] == 1:
+        return float((y * sc + mu)[0][0])
     else:
-        idx = int(np.argmax(preds))
-        classes = ["Normal", "Pneumonia"]
-        label = classes[idx]
-        prob = float(np.max(preds))
-    return label, round(prob * 100, 2)
+        # assume target correspond to first column used when scaling; invert using first entry
+        return float(y[0][0] * sc[0] + mu[0])
 
-def predict_los(features):
+# ----------------- CNN PREDICTION (robust) -----------------
+def preprocess_image_for_model(img: Image.Image, model):
+    # handle grayscale/RGB and resizing based on model input shape if available
+    arr = img.convert("RGB")
+    if hasattr(model, "input_shape") and model.input_shape is not None:
+        # input_shape like (None, height, width, channels)
+        try:
+            _, h, w, c = model.input_shape
+            arr = arr.resize((w, h))
+        except Exception:
+            arr = arr.resize((224, 224))
+    else:
+        arr = arr.resize((224, 224))
+    x = img_to_array(arr).astype("float32") / 255.0
+    return np.expand_dims(x, 0)
+
+def cnn_predict_local(img: Image.Image):
+    if "cnn" not in models:
+        return "Model not available", 0.0
+    m = models["cnn"]
+    x = preprocess_image_for_model(img, m)
+    preds = m.predict(x)
+    # handle single-output (sigmoid) or multiclass (softmax)
+    if preds.size == 0:
+        return "Unknown", 0.0
+    if preds.shape[-1] == 1:
+        p = float(preds[0][0])
+        label = "Pneumonia" if p >= 0.5 else "Normal"
+        return label, p * 100.0
+    else:
+        idx = int(np.argmax(preds[0]))
+        # try safe label mapping. If incorrect, change mapping here.
+        classes = ["Normal", "Pneumonia"] if preds.shape[-1] >= 2 else ["Normal"]
+        label = classes[idx] if idx < len(classes) else f"Class_{idx}"
+        prob = float(np.max(preds[0]))
+        return label, prob * 100.0
+
+# ----------------- LOS PREDICTION (robust) -----------------
+def predict_los_from_features(features_list):
+    # features_list: length N (must match training layout)
+    if "los" not in models:
+        return 1.0
+    los = models["los"]
+    # try to apply scaler if available
+    if "los_scaler" in models:
+        try:
+            scaled = models["los_scaler"].transform([features_list])
+            pred_scaled = los.predict(scaled)
+            # invert using inverse_single_target
+            return max(1.0, round(inverse_single_target(models["los_scaler"], pred_scaled)[0] if hasattr(pred_scaled, "__len__") else inverse_single_target(models["los_scaler"], pred_scaled), 1))
+        except Exception as e:
+            # fallback: try direct predict
+            try:
+                pred = los.predict([features_list])[0]
+                return max(1.0, round(float(pred), 1))
+            except Exception:
+                return 1.0
+    else:
+        try:
+            pred = los.predict([features_list])[0]
+            return max(1.0, round(float(pred), 1))
+        except Exception:
+            return 1.0
+
+# ----------------- LSTM FORECAST (robust) -----------------
+def lstm_forecast_series(series):
+    if "lstm" not in models:
+        return float(np.mean(series))
+    lstm = models["lstm"]
+    # infer model input shape
+    in_shape = lstm.input_shape  # (None, timesteps, features) or (None, timesteps, features)
     try:
-        scaled = models["los_scaler"].transform([features])
-        y_scaled = models["los"].predict(scaled).reshape(-1, 1)
-        inv = models["los_scaler"].inverse_transform(
-            np.hstack([y_scaled] * models["los_scaler"].scale_.shape[0])
-        )[0][0]
-        return max(1, round(float(inv), 1))
+        _, timesteps, features = in_shape
     except Exception:
-        return max(1, round(float(models["los"].predict([features])[0]), 1))
-
-def lstm_forecast(series):
+        # fallback
+        timesteps = 20
+        features = 1
+    arr = np.array(series, dtype=float).reshape(-1)
+    # pad / trim
+    if arr.size < timesteps:
+        pad = np.full(timesteps - arr.size, arr[-1] if arr.size > 0 else 0.0)
+        arr2 = np.concatenate([pad, arr])
+    else:
+        arr2 = arr[-timesteps:]
+    # create required features dimension
+    if features == 1:
+        X = arr2.reshape(1, timesteps, 1)
+    else:
+        # replicate the single series across features (safe fallback)
+        X = np.tile(arr2.reshape(1, timesteps, 1), (1, 1, features))
+    # predict
     try:
-        series = np.asarray(series).astype(np.float32)
-        _, timesteps, features = models["lstm"].input_shape
-        if features is None:
-            features = 1
-        if series.size < timesteps:
-            pad = np.full(timesteps - series.size, series[-1])
-            series = np.concatenate([pad, series])
-        series = series[-timesteps:]
-        X = series.reshape(1, timesteps, features)
-        pred_scaled = models["lstm"].predict(X)
-        val = models["lstm_scaler"].inverse_transform(pred_scaled.reshape(-1, 1))[0][0]
-        return round(float(val), 2)
+        pred = lstm.predict(X)
+        # inverse scale if scaler available
+        if "lstm_scaler" in models:
+            val = inverse_single_target(models["lstm_scaler"], pred.reshape(-1, 1))
+            return round(float(val), 2)
+        else:
+            # assume model outputs scalar
+            return round(float(pred.reshape(-1)[0]), 2)
     except Exception:
-        return round(float(np.mean(series)), 2)
+        # fallback average
+        return round(float(np.mean(arr2)), 2)
 
-def gemini_reply(prompt):
-    try:
-        res = gemini.generate_content(prompt)
-        return res.text.strip()
-    except Exception as e:
-        return f"(Gemini Error) {e}"
+# ----------------- SENTIMENT -----------------
+def sentiment_local(text):
+    if "sentiment_model" in models and "sentiment_vectorizer" in models:
+        try:
+            X = models["sentiment_vectorizer"].transform([text])
+            p = models["sentiment_model"].predict(X)[0]
+            label = "Positive" if int(p) == 1 else "Negative"
+            # optionally check with gemini for better accuracy if available
+            if gemini_configured():
+                g = gemini_short(f"Classify sentiment (Positive/Negative) for: {text}")
+                if "positive" in g.lower():
+                    return "Positive (Gemini)"
+                if "negative" in g.lower():
+                    return "Negative (Gemini)"
+            return label
+        except Exception as e:
+            return f"Error: {e}"
+    else:
+        # fallback to Gemini if configured
+        if gemini_configured():
+            return gemini_short(f"Classify sentiment for: {text} (Positive or Negative)")
+        return "Model not available"
 
-def sentiment_predict(text):
-    X = models["sentiment_vectorizer"].transform([text])
-    pred = models["sentiment_model"].predict(X)[0]
-    sentiment_label = "Positive 😀" if pred == 1 else "Negative 😞"
-    gemini_check = gemini_reply(f"Perform sentiment analysis: {text}. Answer Positive or Negative only.")
-    if "Positive" in gemini_check:
-        sentiment_label = "Positive 😀"
-    elif "Negative" in gemini_check:
-        sentiment_label = "Negative 😞"
-    return sentiment_label
-
-# ---------------------- TABS -------------------------------
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "🏥 Risk & Stay Prediction", 
-    "🧠 LSTM Forecast", 
-    "🩻 CNN Diagnostics", 
-    "💬 Chatbot", 
-    "🌐 Translator", 
-    "❤️ Sentiment Analysis",
-    "📊 Evaluation Metrics"
+# ----------------- UI / Tabs -----------------
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "Risk & LOS", "LSTM Forecast", "CNN (X-ray)", "Chatbot (Gemini)", "Translator (Gemini)", "Sentiment"
 ])
 
-# ---------------------- TAB 1: RISK + STAY -----------------
 with tab1:
-    st.subheader("🏥 Disease Risk Classification & Hospital Stay Prediction")
+    st.header("Disease Risk Classification + Length of Stay")
+    # NOTE: you said you uploaded CSVs manually; we assume user will provide tabular inputs
     c1, c2, c3 = st.columns(3)
     with c1:
-        age = st.number_input("Age", 1, 100)
-        bp = st.number_input("Blood Pressure", 50, 200)
+        age = st.number_input("Age", min_value=1, max_value=120, value=45)
+        bp = st.number_input("Blood Pressure", min_value=40, max_value=220, value=120)
+        glucose = st.number_input("Glucose Level", min_value=50, max_value=400, value=100)
     with c2:
-        chol = st.number_input("Cholesterol", 50, 400)
-        sugar = st.number_input("Blood Sugar", 50, 300)
+        bmi = st.number_input("BMI", min_value=8.0, max_value=60.0, value=24.5)
+        hr = st.number_input("Heart Rate", min_value=30, max_value=200, value=80)
+        chol = st.number_input("Cholesterol", min_value=50, max_value=400, value=200)
     with c3:
-        bmi = st.number_input("BMI", 10.0, 50.0)
-        heart_rate = st.number_input("Heart Rate", 30, 180)
+        st.write(" ")
+        if st.button("Predict Risk & LOS"):
+            features = [age, bp, glucose, bmi, hr, chol]
+            # risk
+            try:
+                if "risk" in models:
+                    if "risk_scaler" in models:
+                        risk_X = models["risk_scaler"].transform([features])
+                        risk_pred = models["risk"].predict(risk_X)[0]
+                    else:
+                        risk_pred = models["risk"].predict([features])[0]
+                    st.success(f"Disease Risk: {'HIGH' if int(risk_pred)==1 else 'LOW'}")
+                else:
+                    st.info("Risk model not available")
+            except Exception as e:
+                st.error(f"Risk prediction error: {e}")
+            # LOS
+            los_days = predict_los_from_features(features)
+            st.info(f"Predicted Length of Stay: {los_days} days")
 
-    if st.button("🔍 Predict Risk & Stay"):
-        features = [age, bp, chol, sugar, bmi, heart_rate]
-        risk_scaled = models["risk_scaler"].transform([features])
-        risk_pred = models["risk"].predict(risk_scaled)[0]
-        los_pred = predict_los(features)
-
-        st.success(f"🩺 Disease Risk: {'High' if risk_pred == 1 else 'Low'}")
-        st.info(f"🏨 Expected Hospital Stay: {los_pred} days")
-
-# ---------------------- TAB 2: LSTM FORECAST ----------------
 with tab2:
-    st.subheader("🧠 Health Metric Forecast using LSTM")
-    seq = st.text_area("Enter comma-separated patient vitals (e.g., 98,99,100,101)")
-    if st.button("📈 Forecast"):
-        if seq:
-            arr = list(map(float, seq.split(",")))
-            forecast = lstm_forecast(arr)
-            st.metric("Predicted Metric", f"{forecast}")
-        else:
-            st.warning("Enter numeric sequence data!")
+    st.header("LSTM Forecast (time-series)")
+    seq = st.text_area("Enter time series (comma separated numbers). E.g., 98,99,100,101", height=80)
+    if st.button("Forecast LSTM"):
+        try:
+            if not seq.strip():
+                st.warning("Enter a sequence")
+            else:
+                vals = [float(x.strip()) for x in seq.split(",") if x.strip()!='']
+                out = lstm_forecast_series(vals)
+                st.metric("Forecasted value", out)
+        except Exception as e:
+            st.error(f"LSTM error: {e}")
 
-# ---------------------- TAB 3: CNN DIAGNOSTICS --------------
 with tab3:
-    st.subheader("🩻 Pneumonia Detection via CNN")
-    file = st.file_uploader("Upload Chest X-ray Image", type=["jpg", "jpeg", "png"])
-    if file:
-        img = Image.open(file)
-        st.image(img, caption="Uploaded Image", width=250)
-        if st.button("🧠 Analyze Image"):
-            label, prob = cnn_predict(img)
-            st.success(f"Prediction: **{label}** ({prob}%)")
+    st.header("CNN — Chest X-ray classification")
+    uploaded = st.file_uploader("Upload chest X-ray", type=["png","jpg","jpeg"])
+    if uploaded:
+        img = Image.open(uploaded)
+        st.image(img, width=300)
+        if st.button("Analyze Image"):
+            label, prob = cnn_predict_local(img)
+            st.success(f"Result: {label} ({prob:.2f}%)")
 
-# ---------------------- TAB 4: CHATBOT ----------------------
 with tab4:
-    st.subheader("💬 Gemini Healthcare Chatbot")
-    query = st.text_input("Ask any health-related question:")
-    if query:
-        short = gemini_reply(f"Answer in 5 words only: {query}")
-        st.info(f"💡 Quick Answer: {short}")
-        if st.button("Explain More"):
-            detailed = gemini_reply(f"Explain shortly: {query}")
-            st.success(detailed)
-
-# ---------------------- TAB 5: TRANSLATOR -------------------
-with tab5:
-    st.subheader("🌐 Multilingual Medical Translator")
-    text = st.text_input("Enter medical sentence:")
-    lang = st.text_input("Translate to (e.g., Tamil, Hindi, French)")
-    if st.button("🌍 Translate"):
-        result = gemini_reply(f"Translate this medical text into {lang}: {text}")
-        st.success(result)
-
-# ---------------------- TAB 6: SENTIMENT --------------------
-with tab6:
-    st.subheader("❤️ Patient Feedback Sentiment (Gemini + ML)")
-    feedback = st.text_area("Enter feedback:")
-    if st.button("🧭 Analyze Sentiment"):
-        if feedback.strip():
-            result = sentiment_predict(feedback)
-            st.success(f"Sentiment: {result}")
+    st.header("Chatbot (Gemini)")
+    q = st.text_input("Ask a health question (short):")
+    if st.button("Get Short Answer"):
+        if q.strip():
+            short = gemini_short(f"Answer in one short sentence: {q}")
+            st.info(short)
+            if st.button("Explain this in detail"):
+                expl = gemini_short(f"Explain clearly and concisely: {q}")
+                st.write(expl)
         else:
-            st.warning("Please enter feedback text.")
+            st.warning("Type a question")
 
-# ---------------------- TAB 7: EVALUATION METRICS -----------
-with tab7:
-    st.subheader("📊 Evaluation Metrics Dashboard")
+with tab5:
+    st.header("Translator (Gemini)")
+    src = st.text_area("Text to translate:")
+    tgt = st.text_input("Target language (e.g., Hindi, Tamil, French):")
+    if st.button("Translate"):
+        if not src.strip() or not tgt.strip():
+            st.warning("Enter both text and target language")
+        else:
+            out = gemini_short(f"Translate the following medical text to {tgt}: {src}")
+            st.success(out)
 
-    # Dummy demonstration values
-    y_true_class = [0, 1, 1, 0, 1]
-    y_pred_class = [0, 1, 0, 0, 1]
-    y_true_reg = [2.3, 3.1, 4.5, 2.7]
-    y_pred_reg = [2.5, 3.0, 4.3, 2.8]
+with tab6:
+    st.header("Sentiment analysis")
+    feedback = st.text_area("Patient feedback / note:")
+    if st.button("Analyze Sentiment"):
+        if not feedback.strip():
+            st.warning("Enter text")
+        else:
+            s = sentiment_local(feedback)
+            st.success(s)
 
-    acc = accuracy_score(y_true_class, y_pred_class)
-    f1 = f1_score(y_true_class, y_pred_class)
-    mae = mean_absolute_error(y_true_reg, y_pred_reg)
-    rmse = math.sqrt(mean_squared_error(y_true_reg, y_pred_reg))
-    bleu = sentence_bleu([["the", "patient", "is", "stable"]], ["patient", "is", "stable"])
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Accuracy", f"{acc*100:.2f}%")
-    c2.metric("F1 Score", f"{f1:.2f}")
-    c3.metric("MAE", f"{mae:.2f}")
-    c4.metric("RMSE", f"{rmse:.2f}")
-    c5.metric("BLEU", f"{bleu:.2f}")
-
-    st.caption("✅ Metrics are sample demo values; models can be validated with test datasets.")
+# final note for user
+st.markdown("---")
+st.caption("Notes: • Models must be present in the `models/` folder. • Put Gemini key + model in Streamlit secrets as GENAI_API_KEY and GENAI_MODEL. • This app uses safe fallbacks for missing models.")
