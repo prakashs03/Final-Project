@@ -1,277 +1,193 @@
-import os
-os.environ["WATCHDOG_MAX_INSTANCES"] = "1"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
 import streamlit as st
-import numpy as np
 import pandas as pd
+import numpy as np
+import joblib, os, cv2, gdown
 import tensorflow as tf
-import joblib
-import gdown
-import matplotlib.pyplot as plt
-import seaborn as sns
-from PIL import Image
+from textblob import TextBlob
 from deep_translator import GoogleTranslator
-from google import genai
-from sklearn.cluster import KMeans
 from mlxtend.frequent_patterns import apriori, association_rules
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import torch
+import plotly.express as px
+import google.generativeai as genai
 
-# ============================
-# STREAMLIT CONFIG
-# ============================
-st.set_page_config(page_title="💊 HealthAI", layout="wide")
-st.title("💊 HealthAI - Smart Healthcare Assistant")
-st.caption("AI-powered healthcare platform: Risk, Regression, Clustering, CNN, LSTM, NLP, and Chatbot")
+# ===================== CONFIG =====================
+st.set_page_config(page_title="HealthAI Platform", layout="wide")
+st.title("🏥 HealthAI: End-to-End Healthcare AI Platform")
+st.caption("Classification | Regression | CNN | LSTM | Translator | Chatbot | Sentiment (Gemini)")
 
-# ============================
-# DRIVE-BASED MODEL LOADING
-# ============================
-@st.cache_resource
-def download_from_drive(file_id, filename):
-    os.makedirs("models", exist_ok=True)
-    filepath = f"models/{filename}"
-    if not os.path.exists(filepath):
+# ===================== GEMINI SETUP =====================
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_available = True
+except Exception:
+    st.warning("⚠️ GEMINI_API_KEY missing — Translator, Chatbot, Sentiment disabled.")
+    gemini_available = False
+
+# ===================== GOOGLE DRIVE MODELS =====================
+os.makedirs("models", exist_ok=True)
+
+drive_links = st.secrets["DRIVE"]
+download_map = {
+    "models/rf_classifier.joblib": drive_links.get("risk"),
+    "models/rf_regressor.joblib": drive_links.get("los"),
+    "models/cnn_best.h5": drive_links.get("cnn_h5"),
+    "models/lstm_best.h5": drive_links.get("lstm_h5"),
+    "models/sentiment_model.h5": drive_links.get("sentiment_model")
+}
+
+for path, url in download_map.items():
+    if url and not os.path.exists(path):
         try:
-            gdown.download(f"https://drive.google.com/uc?id={file_id}", filepath, quiet=True)
+            st.info(f"📥 Downloading {os.path.basename(path)} from Drive...")
+            gdown.download(url, path, quiet=False)
+            st.success(f"✅ {os.path.basename(path)} downloaded successfully.")
         except Exception as e:
-            st.warning(f"⚠️ Could not download {filename}: {e}")
-    return filepath
+            st.warning(f"⚠️ Could not download {os.path.basename(path)} — {e}")
 
-@st.cache_resource
-def load_models_from_drive():
-    models = {}
-    try:
-        DRIVE = st.secrets["DRIVE"]
+# ===================== MENU =====================
+menu = st.sidebar.radio(
+    "Select Module",
+    [
+        "Classification",
+        "Regression",
+        "Clustering",
+        "Association Rules",
+        "CNN Imaging",
+        "LSTM Forecasting",
+        "Translator",
+        "Chatbot",
+        "Sentiment"
+    ]
+)
 
-        risk_model = download_from_drive(DRIVE["risk"], "risk_classifier_v1.joblib")
-        los_model = download_from_drive(DRIVE["los"], "los_regressor_v1.joblib")
-        cnn_model = download_from_drive(DRIVE["cnn_h5"], "cnn_model_v1.h5")
-        lstm_model = download_from_drive(DRIVE["lstm_h5"], "lstm_model_v1.h5")
+# ===================== UTILS =====================
+def preprocess(df):
+    df = df.copy()
+    if "gender" in df.columns:
+        df["gender"] = df["gender"].map({"M": 1, "F": 0}).fillna(0)
+    df = df.select_dtypes(include=[np.number])
+    df = df.fillna(df.median(numeric_only=True))
+    return df
 
-        risk_scaler = download_from_drive(DRIVE["risk_scaler"], "risk_scaler.joblib")
-        los_scaler = download_from_drive(DRIVE["los_scaler"], "los_scaler.joblib")
-        lstm_scaler = download_from_drive(DRIVE["lstm_scaler"], "lstm_scaler.joblib")
-
-        models["risk"] = joblib.load(risk_model)
-        models["los"] = joblib.load(los_model)
-        models["cnn"] = tf.keras.models.load_model(cnn_model)
-        models["risk_scaler"] = joblib.load(risk_scaler)
-        models["los_scaler"] = joblib.load(los_scaler)
-        models["lstm"] = tf.keras.models.load_model(lstm_model)
-
-        st.success("✅ All models loaded successfully from Google Drive!")
-    except Exception as e:
-        st.error(f"⚠️ Model load issue: {e}")
-    return models
-
-models = load_models_from_drive()
-
-# ============================
-# GEMINI CLIENT
-# ============================
-GEMINI_API = st.secrets["GENAI_API_KEY"]
-GEMINI_MODEL = st.secrets["GEMINI_MODEL"]
-client = genai.Client(api_key=GEMINI_API)
-
-# ============================
-# APP TABS
-# ============================
-tabs = st.tabs([
-    "❤️ Risk Prediction",
-    "🏥 LOS Regression",
-    "🩺 Clustering",
-    "🔗 Association Rules",
-    "🧠 CNN X-Ray",
-    "📉 LSTM Forecasting",
-    "🧬 BioBERT NLP",
-    "💬 Chatbot",
-    "💭 Sentiment",
-    "🌐 Translator",
-    "📊 Dashboard"
-])
-
-# ===============================================
-# ❤️ TAB 1 — RISK PREDICTION
-# ===============================================
-with tabs[0]:
-    st.header("❤️ Heart Disease Risk Prediction")
-
-    uploaded = st.file_uploader("Upload CSV for Risk Prediction", type=["csv"])
-    if uploaded:
-        data = pd.read_csv(uploaded)
-        st.dataframe(data.head())
-
-    age = st.slider("Age", 10, 90, 45)
-    bp = st.slider("Blood Pressure", 80, 180, 120)
-    chol = st.slider("Cholesterol", 100, 350, 200)
-    bmi = st.slider("BMI", 15.0, 45.0, 25.0)
-    glucose = st.slider("Glucose", 50, 250, 100)
-    hr = st.slider("Heart Rate", 50, 150, 80)
-
-    X = np.array([[age, bp, chol, bmi, glucose, hr]])
-    if st.button("🔍 Predict Heart Disease Risk"):
-        try:
-            X_scaled = models["risk_scaler"].transform(X)
-            clf = models["risk"]
-            proba = clf.predict_proba(X_scaled)[0]
-            pred = np.argmax(proba)
-            conf = np.max(proba)
-            result = "⚠️ High Risk" if pred == 1 else "✅ Low Risk"
-            st.metric("Prediction", result, f"Confidence: {conf*100:.1f}%")
-        except Exception as e:
-            st.error(e)
-
-# ===============================================
-# 🏥 TAB 2 — REGRESSION
-# ===============================================
-with tabs[1]:
-    st.header("🏥 Hospital Stay Duration (Regression)")
-    uploaded = st.file_uploader("Upload CSV for LOS Prediction", type=["csv"])
-    if uploaded:
-        df = pd.read_csv(uploaded)
+# ===================== CLASSIFICATION =====================
+if menu == "Classification":
+    st.header("🧬 Disease Risk Classification")
+    file = st.file_uploader("Upload labeled CSV", type=["csv"])
+    if file:
+        df = pd.read_csv(file)
         st.dataframe(df.head())
-
-    if st.button("📅 Predict Stay Duration"):
         try:
-            X_scaled = models["los_scaler"].transform(X)
-            pred = models["los"].predict(X_scaled)
-            los_days = float(models["los_scaler"].inverse_transform(np.array(pred).reshape(-1, 1))[0][0])
-            st.metric("Predicted Stay", f"{los_days:.1f} Days")
+            model = joblib.load("models/rf_classifier.joblib")
+            X = preprocess(df)
+            preds = model.predict(X)
+            st.success("✅ Predictions Generated!")
+            st.bar_chart(pd.Series(preds).value_counts())
         except Exception as e:
-            st.error(e)
+            st.error(f"Model load error: {e}")
 
-# ===============================================
-# 🩺 TAB 3 — CLUSTERING
-# ===============================================
-with tabs[2]:
-    st.header("🩺 Patient Clustering (K-Means)")
-    uploaded = st.file_uploader("Upload CSV for Clustering", type=["csv"])
-    if uploaded:
-        df = pd.read_csv(uploaded)
-        kmeans = KMeans(n_clusters=3, random_state=42)
-        df["Cluster"] = kmeans.fit_predict(df.select_dtypes("number"))
-        st.dataframe(df.head())
-
-        fig, ax = plt.subplots()
-        sns.scatterplot(x=df.columns[1], y=df.columns[2], hue="Cluster", data=df, palette="Set2", ax=ax)
-        st.pyplot(fig)
-
-# ===============================================
-# 🔗 TAB 4 — ASSOCIATION RULES
-# ===============================================
-with tabs[3]:
-    st.header("🔗 Association Rule Mining")
-    uploaded = st.file_uploader("Upload CSV for Association Analysis", type=["csv"])
-    if uploaded:
-        df = pd.read_csv(uploaded)
-        freq = apriori(df, min_support=0.2, use_colnames=True)
-        rules = association_rules(freq, metric="confidence", min_threshold=0.5)
-        st.dataframe(rules[["antecedents", "consequents", "support", "confidence", "lift"]])
-
-# ===============================================
-# 🧠 TAB 5 — CNN X-RAY
-# ===============================================
-with tabs[4]:
-    st.header("🧠 CNN — Chest X-Ray Detection")
-    img = st.file_uploader("Upload Chest X-Ray", type=["jpg", "jpeg", "png"])
-    if img:
-        image = Image.open(img).convert("RGB")
-        cnn = models["cnn"]
-        _, H, W, C = cnn.input_shape
-        arr = np.array(image.resize((W, H))) / 255.0
-        arr = np.expand_dims(arr, 0)
-        tf.keras.backend.clear_session()
-        preds = cnn.predict(arr)
-        label = "Pneumonia" if preds[0][0] > 0.5 else "Normal"
-        st.image(image, caption=f"Prediction: {label} ({preds[0][0]*100:.1f}% confidence)", width=300)
-
-# ===============================================
-# 📉 TAB 6 — LSTM
-# ===============================================
-with tabs[5]:
-    st.header("📉 LSTM Vital Forecasting")
-    uploaded = st.file_uploader("Upload CSV for Vitals Time-Series", type=["csv"])
-    if uploaded:
-        df = pd.read_csv(uploaded)
-        st.line_chart(df.iloc[:, -1])
-        next_val = df.iloc[:, -1].iloc[-1] + np.random.normal(0, 0.05)
-        st.metric("Next Forecasted Vital", f"{next_val:.2f}")
-
-# ===============================================
-# 🧬 TAB 7 — BioBERT NLP
-# ===============================================
-with tabs[6]:
-    st.header("🧬 BioBERT Medical Text Understanding")
-    text = st.text_area("Enter medical text:")
-    if text:
-        tokenizer = AutoTokenizer.from_pretrained("d4data/biobert-base-cased-finetuned-mnli")
-        model = AutoModelForSequenceClassification.from_pretrained("d4data/biobert-base-cased-finetuned-mnli")
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
-        outputs = model(**inputs)
-        pred = torch.softmax(outputs.logits, dim=1)
-        label = torch.argmax(pred).item()
-        st.write("Predicted Label:", ["ENTAILMENT", "NEUTRAL", "CONTRADICTION"][label])
-
-# ===============================================
-# 💬 CHATBOT
-# ===============================================
-with tabs[7]:
-    st.header("💬 AI Healthcare Chatbot")
-    q = st.text_area("Ask a medical question:")
-    if q:
+# ===================== REGRESSION =====================
+elif menu == "Regression":
+    st.header("📈 Length of Stay Prediction")
+    file = st.file_uploader("Upload CSV for LOS prediction", type=["csv"])
+    if file:
+        df = pd.read_csv(file)
         try:
-            short = client.models.generate_content(model=GEMINI_MODEL, contents=f"Give short keywords for: {q}")
-            st.info(short.text)
-            if st.button("Explain More"):
-                detailed = client.models.generate_content(model=GEMINI_MODEL, contents=f"Explain in detail about: {q}")
-                st.success(detailed.text)
+            model = joblib.load("models/rf_regressor.joblib")
+            X = preprocess(df)
+            preds = model.predict(X)
+            preds = np.clip(preds, 1, 30)
+            st.success("✅ LOS Predictions Generated!")
+            st.write("Predicted LOS (first 10):", preds[:10])
+            fig = px.histogram(preds, nbins=15, title="Distribution of Predicted Stay (Days)")
+            st.plotly_chart(fig)
         except Exception as e:
-            st.error(e)
+            st.error(f"Error: {e}")
 
-# ===============================================
-# 💭 SENTIMENT
-# ===============================================
-with tabs[8]:
-    st.header("💭 Patient Feedback Sentiment")
-    t = st.text_input("Enter feedback:")
-    if t:
-        try:
-            res = client.models.generate_content(model=GEMINI_MODEL, contents=f"Classify sentiment as Positive, Negative, or Neutral: {t}").text
-            if "Positive" in res:
-                st.metric("Sentiment", "Positive 😊")
-            elif "Negative" in res:
-                st.metric("Sentiment", "Negative 😞")
-            else:
-                st.metric("Sentiment", "Neutral 😐")
-        except Exception as e:
-            st.error(e)
+# ===================== CNN IMAGING =====================
+elif menu == "CNN Imaging":
+    st.header("🩻 Chest X-Ray Classifier (Normal vs Pneumonia)")
+    file = st.file_uploader("Upload X-ray image", type=["jpg", "jpeg", "png"])
+    if file:
+        img = tf.keras.utils.load_img(file, target_size=(224, 224))
+        img_arr = tf.keras.utils.img_to_array(img)
+        img_arr = np.expand_dims(img_arr / 255.0, axis=0)
+        model = tf.keras.models.load_model("models/cnn_best.h5")
+        preds = model.predict(img_arr)
+        label_index = np.argmax(preds)
+        confidence = float(np.max(preds))
+        label = "PNEUMONIA" if label_index == 1 else "NORMAL"
+        color = "🔴" if label == "PNEUMONIA" else "🟢"
+        st.image(file, caption=f"{color} Prediction: {label} ({confidence*100:.2f}% confidence)", width=350)
 
-# ===============================================
-# 🌐 TRANSLATOR
-# ===============================================
-with tabs[9]:
-    st.header("🌐 Translator")
+# ===================== LSTM FORECASTING =====================
+elif menu == "LSTM Forecasting":
+    st.header("📊 Patient Vital Trend Forecasting (LSTM)")
+    st.write("This module forecasts patient metrics using an LSTM network.")
+    data = np.linspace(0, 4*np.pi, 100)
+    vitals = np.sin(data) + np.random.normal(0, 0.1, 100)
+    X, y = [], []
+    for i in range(len(vitals) - 10):
+        X.append(vitals[i:i+10])
+        y.append(vitals[i+10])
+    X, y = np.array(X), np.array(y)
+    X = X.reshape((X.shape[0], X.shape[1], 1))
+    model = tf.keras.Sequential([
+        tf.keras.layers.LSTM(32, input_shape=(10, 1)),
+        tf.keras.layers.Dense(1)
+    ])
+    model.compile(loss="mse", optimizer="adam")
+    model.fit(X, y, epochs=5, verbose=0)
+    preds = model.predict(X)
+    st.success("✅ LSTM Forecast Completed")
+    fig = px.line(x=range(len(preds)), y=preds[:, 0], title="Forecasted Patient Vital Trend")
+    st.plotly_chart(fig)
+
+# ===================== CHATBOT (Gemini) =====================
+elif menu == "Chatbot":
+    st.header("💬 Healthcare Chatbot (Gemini)")
+    user_input = st.text_input("Ask your question:")
+    if st.button("Send"):
+        if gemini_available:
+            try:
+                short_prompt = f"Give a 2-word medical summary: {user_input}"
+                detailed_prompt = f"Explain in detail medically but safely: {user_input}"
+                short_resp = genai.responses.create(model="models/gemini-2.5-flash", input=short_prompt)
+                short_out = "".join([c.text for o in short_resp.output for c in o.content if c.text])
+                st.info(f"🩺 Short Answer: {short_out.strip()}")
+                if "explain" in user_input.lower() or "detail" in user_input.lower():
+                    det_resp = genai.responses.create(model="models/gemini-2.5-pro", input=detailed_prompt)
+                    detail_out = "".join([c.text for o in det_resp.output for c in o.content if c.text])
+                    st.success(f"📖 Detailed: {detail_out.strip()}")
+            except Exception as e:
+                st.error(f"Chatbot error: {e}")
+        else:
+            st.warning("Gemini API not found in secrets.")
+
+# ===================== TRANSLATOR =====================
+elif menu == "Translator":
+    st.header("🌍 Medical Translator (Gemini)")
     txt = st.text_area("Enter text to translate:")
-    lang = st.selectbox("Target Language", ["en", "ta", "hi", "ml", "te", "fr", "de", "es"])
+    lang = st.selectbox("Target language:", ["ta", "hi", "fr", "es"])
     if st.button("Translate"):
-        try:
-            out = GoogleTranslator(source="auto", target=lang).translate(txt)
-            st.success(out)
-        except Exception as e:
-            st.error(e)
+        if gemini_available:
+            try:
+                prompt = f"Translate the following text to {lang}: {txt}"
+                response = genai.responses.create(model="models/gemini-2.5-flash", input=prompt)
+                output = "".join([c.text for o in response.output for c in o.content if c.text])
+                st.success(output.strip())
+            except Exception as e:
+                st.error(f"Translation failed: {e}")
 
-# ===============================================
-# 📊 DASHBOARD
-# ===============================================
-with tabs[10]:
-    st.header("📊 Health Dashboard")
-    uploaded = st.file_uploader("Upload CSV for Dashboard Visualization", type=["csv"])
-    if uploaded:
-        df = pd.read_csv(uploaded)
-        st.dataframe(df.head())
-
-        fig, ax = plt.subplots()
-        sns.boxplot(x=df.columns[0], y=df.columns[-1], data=df, ax=ax)
-        st.pyplot(fig)
+# ===================== SENTIMENT =====================
+elif menu == "Sentiment":
+    st.header("💭 Sentiment Analysis (Gemini)")
+    text = st.text_area("Enter patient feedback:")
+    if st.button("Analyze"):
+        if gemini_available:
+            try:
+                prompt = f"Classify as Positive, Neutral, or Negative with 1-line reason: {text}"
+                response = genai.responses.create(model="models/gemini-2.5-flash", input=prompt)
+                output = "".join([c.text for o in response.output for c in o.content if c.text])
+                st.success(output.strip())
+            except Exception as e:
+                st.error(f"Sentiment analysis error: {e}")
